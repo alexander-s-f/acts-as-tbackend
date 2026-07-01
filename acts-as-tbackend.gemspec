@@ -10,14 +10,14 @@ Gem::Specification.new do |spec|
   spec.description = "Pooled, circuit-broken, idempotent client for TBackend: persistent framed " \
                      "sockets, write_fact_once with deterministic ids, token auth, and a " \
                      "connection pool sized for multi-threaded Rails."
-  spec.homepage    = "https://git.int.avenlance.com/Igniter/acts-as-tbackend"
+  spec.homepage    = "https://github.com/alexander-s-f/acts-as-tbackend"
   spec.license     = "MIT"
   spec.required_ruby_version = ">= 3.0"
 
-  # Private Forgejo RubyGems registry. `allowed_push_host` blocks an accidental push to
-  # the public rubygems.org — this gem is internal-only.
+  # Public RubyGems release. Forgejo may mirror the repository, but it is not the
+  # package authority for SparkCRM / team installs.
   spec.metadata = {
-    "allowed_push_host" => "https://git.int.avenlance.com/api/packages/Igniter/rubygems",
+    "allowed_push_host" => "https://rubygems.org",
     "homepage_uri"      => spec.homepage,
     "source_code_uri"   => spec.homepage
   }

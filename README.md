@@ -9,6 +9,15 @@ Status: connector is **prod-shaped**; TBackend itself stays a **shadow-ready**
 side ledger (Rails/Postgres authoritative) until convergence + ops gates. See
 `../igniter-tbackend/docs/tbackend-onboarding.md`.
 
+Canonical repository:
+
+```text
+https://github.com/alexander-s-f/acts-as-tbackend
+```
+
+Forgejo may mirror this repository for internal navigation, but GitHub is the
+team-facing source and RubyGems is the package authority.
+
 ## Layers (deliberately separate)
 
 | Layer | File | Responsibility |

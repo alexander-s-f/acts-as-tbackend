@@ -1,68 +1,81 @@
-# Releasing acts-as-tbackend — Forgejo private registry option
+# Releasing acts-as-tbackend
 
-`acts-as-tbackend` is internal-only. This document describes the current **Forgejo
-RubyGems package registry** option (owner `Igniter` on `git.int.avenlance.com`),
-not rubygems.org. The gemspec's `allowed_push_host` blocks an accidental public push.
-
-If GitHub becomes the canonical repository/package host, update the gemspec
-`allowed_push_host`, homepage/source URIs, and the SparkCRM bundler source before
-publishing.
-
-Registry URL:
+`acts-as-tbackend` is public as part of `igniter-lab` and should now live as a
+small standalone public GitHub repository:
 
 ```text
-https://git.int.avenlance.com/api/packages/Igniter/rubygems
+https://github.com/alexander-s-f/acts-as-tbackend
 ```
 
-## One-time: auth
+The Forgejo repository may remain an internal read-only mirror, but it is not the
+canonical source and not the package authority. SparkCRM and other apps should
+consume a normal versioned gem.
 
-Create a Forgejo **access token** with `package:write` (publish) / `package:read` (consume)
-scope, then add it to `~/.gem/credentials` (mode 0600):
+## Repository flow
 
-```yaml
----
-https://git.int.avenlance.com/api/packages/Igniter/rubygems: Bearer <FORGEJO_TOKEN>
+From `igniter-lab`, publish the subtree mirror:
+
+```bash
+bin/push-acts-as-tbackend-mirror
 ```
 
-(Never commit the token. `chmod 600 ~/.gem/credentials`.)
+For the public GitHub repo, either point the helper at a GitHub remote or push the
+same subtree split branch to GitHub:
 
-## Publish a version
+```bash
+git remote add acts-as-tbackend-github https://github.com/alexander-s-f/acts-as-tbackend.git
+bin/push-acts-as-tbackend-github-mirror
+```
+
+Keep the GitHub README as the team-facing entrypoint. If Forgejo is retained,
+make its README say "canonical: GitHub" to avoid dependency-source confusion.
+
+## Publish a RubyGem
+
+The gemspec uses:
+
+```text
+allowed_push_host = https://rubygems.org
+homepage/source   = https://github.com/alexander-s-f/acts-as-tbackend
+```
+
+Release:
 
 ```bash
 cd runtime/acts-as-tbackend
 # 1. bump lib/acts_as_tbackend/version.rb (SemVer) if this is a new release
 # 2. sanity
-ruby -Ilib:test -e 'Dir["test/*_test.rb"].each { |f| require File.expand_path(f) }'   # 12/0 green
-# 3. build + push (allowed_push_host guards the target)
+ruby -Ilib:test -e 'Dir["test/*_test.rb"].each { |f| require File.expand_path(f) }'
+# 3. build + push
 gem build acts-as-tbackend.gemspec
-gem push --host https://git.int.avenlance.com/api/packages/Igniter/rubygems acts-as-tbackend-*.gem
+gem push acts-as-tbackend-*.gem
 rm -f acts-as-tbackend-*.gem
 ```
 
-Versions are immutable — re-pushing the same version fails; bump `VERSION` first.
+Versions are immutable. Re-pushing the same version fails; bump `VERSION` first.
 
-## Consume from SparkCRM if Forgejo stays the package host (P6 canary + beyond)
+## Consume from SparkCRM
 
-Configure bundler auth for the private source (once, per machine/CI):
-
-```bash
-bundle config set --global https://git.int.avenlance.com/api/packages/Igniter/rubygems <FORGEJO_TOKEN>
-```
-
-Then in the SparkCRM `Gemfile`:
+Once published:
 
 ```ruby
-source "https://git.int.avenlance.com/api/packages/Igniter/rubygems" do
-  gem "acts-as-tbackend", "~> 0.2"
-end
+gem "acts-as-tbackend", "~> 0.2"
 ```
 
-This is prod-safe: a normal versioned gem from a private source, no sibling-path checkout
-dependency. The P6 LeadSignal shadow canary stays disabled by default and guards on
-`ActsAsTbackend.enabled?` + the canary flag regardless.
+This is prod-safe: a normal versioned gem, no sibling checkout, no VPN-bound
+package registry, and no private token for ordinary `bundle install`.
+
+The P6 LeadSignal shadow canary remains disabled by default and still guards on:
+
+```text
+ActsAsTbackend.enabled? + canary flag + sample gate
+```
 
 ## Notes
 
-- CI / other developers need `package:read` auth configured to `bundle install`; document the
-  token in the team secret store, not here.
-- First publish also implicitly creates the `Igniter/acts-as-tbackend` package in Forgejo.
+- Do not publish to a private Forgejo package registry for app dependencies unless
+  there is a separate operational reason. It adds VPN/token friction for CI and
+  developers.
+- If GitHub Packages is ever used instead of RubyGems.org, update
+  `allowed_push_host`, this release doc, and SparkCRM's `Gemfile` source block in
+  one commit.
