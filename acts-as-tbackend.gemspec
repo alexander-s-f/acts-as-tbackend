@@ -14,6 +14,14 @@ Gem::Specification.new do |spec|
   spec.license     = "MIT"
   spec.required_ruby_version = ">= 3.0"
 
+  # Private Forgejo RubyGems registry. `allowed_push_host` blocks an accidental push to
+  # the public rubygems.org — this gem is internal-only.
+  spec.metadata = {
+    "allowed_push_host" => "https://git.int.avenlance.com/api/packages/Igniter/rubygems",
+    "homepage_uri"      => spec.homepage,
+    "source_code_uri"   => spec.homepage
+  }
+
   spec.files = Dir["lib/**/*.rb", "README.md"]
   spec.require_paths = ["lib"]
 
