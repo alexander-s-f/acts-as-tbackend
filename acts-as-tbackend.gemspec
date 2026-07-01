@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
   spec.description = "Pooled, circuit-broken, idempotent client for TBackend: persistent framed " \
                      "sockets, write_fact_once with deterministic ids, token auth, and a " \
                      "connection pool sized for multi-threaded Rails."
-  spec.homepage    = "https://git.int.avenlance.com/afokin/acts-as-tbackend"
+  spec.homepage    = "https://git.int.avenlance.com/Igniter/acts-as-tbackend"
   spec.license     = "MIT"
   spec.required_ruby_version = ">= 3.0"
 
