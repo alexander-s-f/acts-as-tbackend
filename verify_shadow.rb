@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# LEGACY (pre-refresh) — verifies the old shadow_comparison path against the pre-refresh
+# API and is NOT part of the refreshed core. Pending port to the new core. Reference only.
+
 require "json"
 require "socket"
 require "zlib"

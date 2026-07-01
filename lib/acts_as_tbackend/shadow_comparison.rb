@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+# LEGACY (pre-refresh) — targets the old ActsAsTbackend API (write_fact / query_scope /
+# async enqueue_job) and is NOT loaded by `require "acts_as_tbackend"`. Pending port to
+# the Connection/Pool/Client/Mirror core. Kept for reference only; do not wire into apps.
+
 require "open3"
 require "json"
 require "tempfile"

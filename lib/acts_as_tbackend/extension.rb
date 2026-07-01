@@ -1,151 +1,104 @@
 # frozen_string_literal: true
 
 require "active_support/concern"
+require_relative "mirror"
 
 module ActsAsTbackend
+  # ActiveRecord integration for the refreshed core. `acts_as_tbackend` mirrors model
+  # lifecycle to TBackend on after_commit — synchronously, with a soft/non-fatal
+  # result (a down daemon never raises into the request path). For heavy write paths,
+  # call `record.tbackend_fact(...)` from your own background job instead.
+  #
+  #   class Order < ApplicationRecord
+  #     acts_as_tbackend store: "orders", except: %i[created_at updated_at]
+  #   end
   module Extension
     extend ActiveSupport::Concern
 
     included do
-      attr_accessor :valid_time
+      # Optional domain valid-time for the fact; defaults to nil.
+      attr_accessor :valid_time unless method_defined?(:valid_time)
     end
 
     class_methods do
-      def acts_as_tbackend(options = {})
+      def acts_as_tbackend(store: nil, only: nil, except: nil)
         class_attribute :tbackend_options
-        self.tbackend_options = {
-          store: options[:store] || table_name,
-          only: options[:only] ? Array(options[:only]).map(&:to_sym) : nil,
-          except: options[:except] ? Array(options[:except]).map(&:to_sym) : nil,
-          host: options[:host] || "127.0.0.1",
-          port: options[:port] || 7401,
-          async: options.key?(:async) ? !!options[:async] : true
-        }
+        self.tbackend_options = { store: (store || table_name).to_s, only: only, except: except }
 
-        # Wire up ActiveRecord lifecycle callbacks
-        after_commit :commit_tbackend_fact, on: %i[create update]
-        after_commit :commit_tbackend_destroy_fact, on: :destroy
+        after_commit :mirror_tbackend_create_update, on: %i[create update]
+        after_commit :mirror_tbackend_destroy, on: :destroy
       end
 
-      # Class-level query API
+      # ---- class-level read API (routes through the shared pooled client) ----
+
       def tbackend_history(id)
-        return [] unless ActsAsTbackend.enabled?
-        begin
-          opts = tbackend_options
-          client = ActsAsTbackend.client(opts[:host], opts[:port])
-          client.facts_for(store: opts[:store], key: id)
-        rescue => e
-          warn "[ActsAsTbackend] Error in tbackend_history: #{e.message}"
-          []
-        end
+        tbackend_guard([]) { ActsAsTbackend.client.facts_for(store: tbackend_options[:store], key: id.to_s) }
       end
 
       def tbackend_latest_for(id, as_of: nil)
-        return nil unless ActsAsTbackend.enabled?
-        begin
-          opts = tbackend_options
-          client = ActsAsTbackend.client(opts[:host], opts[:port])
-          client.latest_for(store: opts[:store], key: id, as_of: as_of)
-        rescue => e
-          warn "[ActsAsTbackend] Error in tbackend_latest_for: #{e.message}"
-          nil
+        tbackend_guard(nil) { ActsAsTbackend.client.latest_for(store: tbackend_options[:store], key: id.to_s, as_of: as_of) }
+      end
+
+      def tbackend_facts_by_seq(after_seq: 0, until_seq: nil)
+        tbackend_guard([]) do
+          ActsAsTbackend.client.facts_by_seq(store: tbackend_options[:store], after_seq: after_seq, until_seq: until_seq)
         end
       end
 
-      def tbackend_query_scope(filters = {}, as_of: nil)
-        return [] unless ActsAsTbackend.enabled?
-        begin
-          opts = tbackend_options
-          client = ActsAsTbackend.client(opts[:host], opts[:port])
-          client.query_scope(store: opts[:store], filters: filters, as_of: as_of)
-        rescue => e
-          warn "[ActsAsTbackend] Error in tbackend_query_scope: #{e.message}"
-          []
-        end
+      def tbackend_guard(default)
+        return default unless ActsAsTbackend.enabled?
+
+        yield
+      rescue StandardError => e
+        ActsAsTbackend::Extension.log("query error: #{e.message}")
+        default
+      end
+    end
+
+    # Public: build the fact for this record (no write) — for apps mirroring from
+    # their own job.
+    def tbackend_fact(event_type:, tombstone: false)
+      opts = self.class.tbackend_options
+      ActsAsTbackend::Mirror.build_fact(
+        record: self, store: opts[:store], event_type: event_type,
+        only: opts[:only], except: opts[:except], tombstone: tombstone, valid_time: valid_time
+      )
+    end
+
+    def mirror_tbackend(event_type:, tombstone: false)
+      opts = self.class.tbackend_options
+      ActsAsTbackend::Mirror.mirror!(
+        record: self, store: opts[:store], event_type: event_type,
+        only: opts[:only], except: opts[:except], tombstone: tombstone, valid_time: valid_time
+      )
+    rescue StandardError => e
+      ActsAsTbackend::Extension.log("mirror error: #{e.message}")
+      { ok: false, status: "error", committed: nil, retryable: nil, response: nil, error: e.message }
+    end
+
+    def self.log(message)
+      if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
+        Rails.logger.error("[ActsAsTbackend] #{message}")
+      else
+        warn "[ActsAsTbackend] #{message}"
       end
     end
 
     private
 
-    def commit_tbackend_fact
-      return unless ActsAsTbackend.enabled?
-
-      opts = self.class.tbackend_options
-      store = opts[:store].to_s
-      key_id = self.id.to_s
-      vt = self.valid_time
-
-      attrs = self.attributes.symbolize_keys
-      if opts[:only]
-        attrs = attrs.slice(*opts[:only])
-      elsif opts[:except]
-        attrs = attrs.except(*opts[:except])
-      end
-
-      if opts[:async]
-        job_args = {
-          opts: { host: opts[:host], port: opts[:port] },
-          fact: { store: store, key: key_id, value: attrs, valid_time: vt }
-        }
-        ActsAsTbackend.enqueue_job("write_fact", job_args)
-      else
-        begin
-          client = ActsAsTbackend.client(opts[:host], opts[:port])
-          prev_fact = client.latest_for(store: store, key: key_id) rescue nil
-          causation = prev_fact ? prev_fact[:id] : nil
-
-          client.write_fact(
-            store: store,
-            key: key_id,
-            value: attrs,
-            causation: causation,
-            valid_time: vt
-          )
-        rescue => e
-          if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
-            Rails.logger.error("[ActsAsTbackend] Error committing fact to TBackend: #{e.message}")
-          else
-            warn "[ActsAsTbackend] Error committing fact: #{e.message}"
-          end
-        end
-      end
+    def mirror_tbackend_create_update
+      event = respond_to?(:previously_new_record?) && previously_new_record? ? "create" : "update"
+      mirror_tbackend(event_type: event)
     end
 
-    def commit_tbackend_destroy_fact
-      return unless ActsAsTbackend.enabled?
-
-      opts = self.class.tbackend_options
-      store = opts[:store].to_s
-      key_id = self.id.to_s
-      vt = self.valid_time
-
-      if opts[:async]
-        job_args = {
-          opts: { host: opts[:host], port: opts[:port] },
-          fact: { store: store, key: key_id, value: { _tombstone: true }, valid_time: vt }
-        }
-        ActsAsTbackend.enqueue_job("write_fact", job_args)
-      else
-        begin
-          client = ActsAsTbackend.client(opts[:host], opts[:port])
-          prev_fact = client.latest_for(store: store, key: key_id) rescue nil
-          causation = prev_fact ? prev_fact[:id] : nil
-
-          client.write_fact(
-            store: store,
-            key: key_id,
-            value: { _tombstone: true },
-            causation: causation,
-            valid_time: vt
-          )
-        rescue => e
-          if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
-            Rails.logger.error("[ActsAsTbackend] Error committing tombstone to TBackend: #{e.message}")
-          else
-            warn "[ActsAsTbackend] Error committing tombstone: #{e.message}"
-          end
-        end
-      end
+    def mirror_tbackend_destroy
+      mirror_tbackend(event_type: "destroy", tombstone: true)
     end
   end
+end
+
+# Self-install the macro when ActiveRecord loads (opt-in: the core entry does not
+# require this file, keeping `require "acts_as_tbackend"` ActiveRecord-free).
+if defined?(ActiveSupport) && ActiveSupport.respond_to?(:on_load)
+  ActiveSupport.on_load(:active_record) { include ActsAsTbackend::Extension }
 end

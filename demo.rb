@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# LEGACY (pre-refresh) — in-memory ActiveRecord demo against the old ActsAsTbackend API.
+# NOT part of the refreshed core. Pending port to the new core. Reference only.
+
 require "bundler/inline"
 
 puts "Initializing Bundle dependencies (ActiveRecord + SQLite3)..."

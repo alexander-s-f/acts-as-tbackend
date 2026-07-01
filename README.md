@@ -1,51 +1,102 @@
-# Acts As TBackend
+# acts-as-tbackend
 
-`acts-as-tbackend` is the ActiveRecord/TBackend adapter seam for mirroring model
-lifecycle facts into TBackend. Its first serious role is Spark-shaped shadow
-work: side-ledger audit, replay, point-in-time explanation, and parity checks
-while Rails/Postgres remains authoritative.
+Production Ruby connector for the **TBackend** temporal-ledger daemon: pooled,
+circuit-broken, idempotent writes over the framed loopback protocol. Built for
+multi-threaded Rails (Puma) — persistent sockets, a connection pool sized to the
+worker threads, and soft, non-fatal results when the daemon is down.
 
-It is not a released gem or Igniter Lang authority. Correct status:
+Status: connector is **prod-shaped**; TBackend itself stays a **shadow-ready**
+side ledger (Rails/Postgres authoritative) until convergence + ops gates. See
+`../igniter-tbackend/docs/tbackend-onboarding.md`.
+
+## Layers (deliberately separate)
+
+| Layer | File | Responsibility |
+| --- | --- | --- |
+| **Connection** | `lib/acts_as_tbackend/connection.rb` | one persistent framed socket + protocol (token, `write_fact_once`, rich status mapping, reconnect). **Not thread-safe.** |
+| **Pool** | `lib/acts_as_tbackend/pool.rb` | N connections, checkout per thread (`connection_pool`). The concurrency layer. |
+| **Client** | `lib/acts_as_tbackend/client.rb` | app-facing facade: pool + circuit breaker. |
+| **Fact** | `lib/acts_as_tbackend/fact.rb` | deterministic derived ids + fact builder. |
+| **Config** | `lib/acts_as_tbackend/config.rb` | host/port/token/timeouts/pool size/durability (ENV-defaulted). |
+| **Mirror** | `lib/acts_as_tbackend/mirror.rb` | plain-Ruby record to fact envelope + soft `write_fact_once_safe`. |
+| **Extension** | `lib/acts_as_tbackend/extension.rb` | optional ActiveRecord macro, loaded explicitly by Rails apps. |
+
+## Usage
+
+```ruby
+ActsAsTbackend.configure do |c|
+  c.host = "127.0.0.1"; c.port = 7401
+  c.token = ENV["TBACKEND_TOKEN"]     # sent on every request when set
+  c.pool_size = 12                    # ≈ Puma threads per process
+  c.durability_default = "accepted"   # or "durable" (group-commit fdatasync)
+end
+
+# Deterministic id → a retry is an idempotent replay, not a duplicate.
+id   = ActsAsTbackend::Fact.derive_id(store: "orders", record_id: order.id,
+                                      event_type: "order.accepted", source_version: order.updated_at)
+fact = ActsAsTbackend::Fact.build(id:, store: "orders", key: "order:#{order.id}",
+                                  value: { status: "accepted" }, valid_time: order.scheduled_at)
+
+result = ActsAsTbackend.client.write_fact_once(fact)
+# => { ok:, status:, committed:, retryable:, response:, error: }
+#    status ∈ committed_acked | idempotent_replay | duplicate_fact_id_conflict
+#             | rejected_before_commit | timeout_unknown | unavailable | circuit_open
+
+ActsAsTbackend.client.facts_by_seq(store: "orders", after_seq: 0)   # clock-free ordered read
+ActsAsTbackend.client.latest_for(store: "orders", key: "order:42")  # point-in-time
+```
+
+Reads/writes never raise for a down daemon (unless `strict`) — they return a soft
+result so a shadow write stays non-fatal, and the circuit breaker fails fast while
+the daemon is unreachable.
+
+## Rails mirror
+
+The core `require "acts_as_tbackend"` stays ActiveRecord-free. Rails apps opt into
+the macro by requiring the extension:
+
+```ruby
+require "acts_as_tbackend/extension"
+
+class Order < ApplicationRecord
+  acts_as_tbackend store: "orders", except: %i[created_at updated_at]
+end
+```
+
+The callback path is intentionally synchronous and soft for v0:
 
 ```text
-implemented lab adapter seam
-  -> shadow-ready candidate
-  -> production adapter only after convergence + operations gates
+after_commit -> Mirror.build_fact -> client.write_fact_once_safe
 ```
 
-## Current Map
+If the daemon is down, the write returns a soft result such as
+`status: "unavailable"` or `status: "circuit_open"` and the Rails request path is
+not raised by default. For heavier paths, call `record.tbackend_fact(...)` or
+`ActsAsTbackend::Mirror.mirror!(...)` from an app-owned background job.
 
-| Path | Purpose |
-| --- | --- |
-| [`lib/acts_as_tbackend.rb`](lib/acts_as_tbackend.rb) | Adapter loader, queue worker, connection pool, and thread-local client cache. |
-| [`lib/acts_as_tbackend/client.rb`](lib/acts_as_tbackend/client.rb) | TCP client for the local TBackend daemon. |
-| [`lib/acts_as_tbackend/extension.rb`](lib/acts_as_tbackend/extension.rb) | ActiveRecord hook sketch for writing lifecycle facts. |
-| [`lib/acts_as_tbackend/shadow_comparison.rb`](lib/acts_as_tbackend/shadow_comparison.rb) | Shadow comparison helper that records CRM-vs-VM result facts. |
-| [`verify_shadow.rb`](verify_shadow.rb) | Local verification runner for TBackend shadow comparison behavior. |
-| [`demo.rb`](demo.rb) | Optional in-memory ActiveRecord demo. It needs local Ruby gems available. |
+## Fork-safety (Puma / Sidekiq)
 
-## Relationship To Other Lab Packages
+Sockets created before a fork are invalid in the child. Reset in the forking hook:
 
-- Uses the local TBackend daemon/substrate from [`../igniter-tbackend`](../igniter-tbackend/).
-- Uses the local VM binary from [`../igniter-vm`](../igniter-vm/) for shadow comparison checks.
-- Demonstrates app/model lifecycle capture and shadow comparison.
-- Does not make Rails production writes depend on TBackend until a separate
-  promotion gate says so.
-- Does not define mainline Igniter runtime or language authority.
-
-## Boundary
-
-- Shadow-ready adapter seam; not a released production gem.
-- No production ActiveRecord authority without convergence/runbook/rollback gates.
-- No Ledger/TBackend mainline mutation authority.
-- No public API, packaging, release, deployment, performance, or compatibility claims.
-- No Igniter Lang canon or runtime authority.
-
-## Local Checks
-
-From this directory:
-
-```bash
-ruby verify_shadow.rb
-ruby demo.rb # optional; requires local ActiveRecord and SQLite gems
+```ruby
+# config/puma.rb
+on_worker_boot { ActsAsTbackend.reset! }
+# Sidekiq
+Sidekiq.configure_server { |cfg| cfg.on(:startup) { ActsAsTbackend.reset! } }
 ```
+
+## Throughput
+
+Persistent pooled sockets + `TCP_NODELAY` make 5–8k rpm (≈83–133 rps) modest. The
+daemon sheds load past `max_inflight_requests` with a retryable `overloaded` →
+`rejected_before_commit`, which `write_fact_once_safe` retries with backoff. A live
+load test proving the number (and finding the ceiling) is the next step.
+
+## Legacy files
+
+`shadow_comparison.rb`, `demo.rb`, and `verify_shadow.rb` are retained as
+pre-refresh reference material for the shadow-parity/demo layer. They are not
+loaded by the core entrypoint and still need a separate port if that layer becomes
+active again.
+
+The refreshed core + optional Rails mirror are the supported v0 surface.
