@@ -23,5 +23,9 @@ Gem::Specification.new do |spec|
   spec.files = Dir["lib/**/*.rb", "README.md"]
   spec.require_paths = ["lib"]
 
-  spec.add_dependency "connection_pool", "~> 2.4"
+  # Only the stable ConnectionPool.new / #with / #shutdown surface is used (see
+  # lib/acts_as_tbackend/pool.rb), unchanged across 2.x and 3.x. Keep the 2.4 floor
+  # but allow 3.x so hosts on modern Sidekiq (which needs connection_pool >= 3.0) can
+  # add this gem without a Sidekiq downgrade.
+  spec.add_dependency "connection_pool", ">= 2.4"
 end
