@@ -1,7 +1,7 @@
 # Releasing acts-as-tbackend
 
-`acts-as-tbackend` is public as part of `igniter-lab` and should now live as a
-small standalone public GitHub repository:
+`acts-as-tbackend` was split out of `igniter-lab` and now lives as a small
+standalone public GitHub repository:
 
 ```text
 https://github.com/alexander-s-f/acts-as-tbackend
@@ -42,7 +42,7 @@ homepage/source   = https://github.com/alexander-s-f/acts-as-tbackend
 Release:
 
 ```bash
-cd runtime/acts-as-tbackend
+cd /Users/alex/dev/projects/igniter-workspace/acts-as-tbackend
 # 1. bump lib/acts_as_tbackend/version.rb (SemVer) if this is a new release
 # 2. sanity
 ruby -Ilib:test -e 'Dir["test/*_test.rb"].each { |f| require File.expand_path(f) }'
