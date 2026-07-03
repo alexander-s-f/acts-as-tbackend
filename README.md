@@ -149,6 +149,41 @@ end
 `retryable` defaults per status; pass extra kwargs to override any field.
 `fake.calls` records every call made (method, args, kwargs) for assertions.
 
+## Outbox contract
+
+For heavier write paths, keep TBackend off the request path by storing a
+persistence-agnostic intent and flushing it from app-owned infrastructure:
+
+```ruby
+intent = ActsAsTbackend::OutboxIntent.from_record(
+  record: order,
+  store: "orders",
+  event_type: "order.accepted",
+  except: %i[created_at updated_at]
+)
+
+# Persist this in your own outbox table/queue/JSON column.
+payload = intent.to_h
+
+# Later, in your own worker:
+restored = ActsAsTbackend::OutboxIntent.from_h(payload)
+flush = ActsAsTbackend::OutboxFlusher.flush(restored, client: ActsAsTbackend.client)
+
+case flush[:status]
+when "inserted", "replay"
+  # mark done
+when "retryable", "unknown"
+  # retry later with flush[:intent].to_h
+when "conflict", "failed"
+  # operator review / dead-letter
+end
+```
+
+`OutboxFlusher` calls `write_fact_once` once and maps the soft result; it does
+not create a database table, enqueue a job, or run an internal retry loop. A
+`timeout_unknown` stays retryable-but-unknown: retrying is safe because the fact
+id is deterministic, and the daemon may answer `idempotent_replay` next time.
+
 ## Shadow without authority
 
 The recipe for adding this gem to a Rails app **without** making TBackend an

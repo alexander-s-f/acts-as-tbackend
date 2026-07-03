@@ -10,6 +10,8 @@ require_relative "acts_as_tbackend/pool"
 require_relative "acts_as_tbackend/client"
 require_relative "acts_as_tbackend/failure_policy"
 require_relative "acts_as_tbackend/mirror"
+require_relative "acts_as_tbackend/outbox_intent"
+require_relative "acts_as_tbackend/outbox_flusher"
 
 # Production connector for the TBackend temporal-ledger daemon.
 #
