@@ -60,6 +60,24 @@ module TestSupport
     server.close
     port
   end
+
+  # A Client whose `ping` returns a canned result without touching a socket —
+  # Pool/Connection have no injection point, so this replaces the Client's
+  # internal @pool with a one-shot fake `.with`. Internal test-only gray-box;
+  # NOT part of the public TestHelpers API (that fakes at the Client
+  # boundary, this fakes one layer deeper to unit-test Client#health itself).
+  def client_with_ping_result(config, ping_result)
+    fake_connection = Object.new
+    fake_connection.define_singleton_method(:ping) { |**_opts| ping_result }
+
+    fake_pool = Object.new
+    fake_pool.define_singleton_method(:with) { |&blk| blk.call(fake_connection) }
+    fake_pool.define_singleton_method(:shutdown) {}
+
+    client = ActsAsTbackend::Client.new(config)
+    client.instance_variable_set(:@pool, fake_pool)
+    client
+  end
 end
 
 FakeRecord = Struct.new(:id, :updated_at, :attributes, keyword_init: true)

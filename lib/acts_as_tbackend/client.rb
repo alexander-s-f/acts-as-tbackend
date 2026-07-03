@@ -45,11 +45,74 @@ module ActsAsTbackend
       call { |c| c.ping(**opts) }
     end
 
+    # LAB-ACTS-AS-TBACKEND-ADAPTER-DX-P4: a safe introspection call - it never
+    # raises (regardless of `config.strict`), even if the config itself is
+    # broken (e.g. an unreachable/malformed host), so ops tooling and a Rails
+    # health-check endpoint can call it unconditionally.
+    #
+    #   ActsAsTbackend.health
+    #   # => { enabled:, host:, port:, durability_default:, strict:,
+    #   #      failure_policy:, ok:, status:, error: }
+    #   #    status ∈ ok | down | circuit_open | auth_error | config_error | disabled | error
+    def health
+      base = {
+        enabled: @config.enabled,
+        host: @config.host,
+        port: @config.port,
+        durability_default: @config.durability_default,
+        strict: @config.strict,
+        failure_policy: @config.failure_policy
+      }
+      return base.merge(ok: true, status: "disabled", error: nil) unless @config.enabled
+
+      begin
+        result = ping
+      rescue StandardError => e
+        return base.merge(ok: false, status: "config_error", error: redact(e.message))
+      end
+
+      base.merge(ok: result[:ok] == true, status: classify_ping(result), error: redact(result[:error]))
+    end
+
     def shutdown
       @pool.shutdown
     end
 
     private
+
+    def classify_ping(result)
+      case result[:status]
+      when "ok" then "ok"
+      when "circuit_open" then "circuit_open"
+      when "unavailable", "timeout_unknown" then "down"
+      else
+        auth_error?(result[:error]) ? "auth_error" : "error"
+      end
+    end
+
+    # The daemon's auth middleware (igniter-tbackend `packs/auth.rs`) rejects
+    # with a static "Authentication failed: ..." / "Access denied: ..."
+    # message (never echoes the token) - classify on that, not an error_code
+    # (the daemon does not set one for auth rejections).
+    def auth_error?(error)
+      return false if error.nil?
+
+      text = error.to_s
+      text.include?("Authentication failed") || text.include?("Access denied")
+    end
+
+    # Redacts `config.token` from any string that might contain it. Health
+    # output has NO `token:` field to begin with, but error text is
+    # server/exception-provided and untrusted - never assume it is clean.
+    def redact(text)
+      return nil if text.nil?
+
+      text = text.to_s
+      token = @config.token
+      return text if token.nil? || token.to_s.empty?
+
+      text.gsub(token.to_s, "[REDACTED]")
+    end
 
     def call
       return circuit_open_result unless @breaker.allow_request?

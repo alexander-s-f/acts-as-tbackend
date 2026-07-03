@@ -13,10 +13,10 @@ module ActsAsTbackend
   module Mirror
     module_function
 
-    def build_fact(record:, store:, event_type:, only: nil, except: nil, tombstone: false, valid_time: nil)
+    def build_fact(record:, store:, event_type:, only: nil, except: nil, denylist: nil, tombstone: false, valid_time: nil)
       store = store.to_s
       record_id = record.id
-      value = tombstone ? { "_tombstone" => true } : select_value(record, only: only, except: except)
+      value = tombstone ? { "_tombstone" => true } : select_value(record, only: only, except: except, denylist: denylist)
 
       Fact.build(
         id: Fact.derive_id(store: store, record_id: record_id, event_type: event_type,
@@ -30,24 +30,23 @@ module ActsAsTbackend
       )
     end
 
-    # Build + idempotent bounded-safe write. Soft/non-fatal: returns the client's soft
-    # result and never raises for a down daemon unless `config.strict`.
+    # Build + idempotent bounded-safe write. Soft/non-fatal by default: returns
+    # the client's soft result. `config.failure_policy` decides whether a soft
+    # failure ALSO warns or raises (`raise_in_test` only, never in production)
+    # - see FailurePolicy. The result itself is unchanged either way.
     def mirror!(record:, store:, event_type:, **opts)
       return disabled_result unless ActsAsTbackend.enabled?
 
       fact = build_fact(record: record, store: store, event_type: event_type, **opts)
-      ActsAsTbackend.client.write_fact_once_safe(fact)
+      result = ActsAsTbackend.client.write_fact_once_safe(fact)
+      FailurePolicy.apply(result, context: { store: store, event_type: event_type })
     end
 
-    def select_value(record, only:, except:)
-      attrs = stringify(record.attributes)
-      if only
-        attrs.slice(*Array(only).map(&:to_s))
-      elsif except
-        attrs.except(*Array(except).map(&:to_s))
-      else
-        attrs
-      end
+    # LAB-ACTS-AS-TBACKEND-ADAPTER-DX-P4: delegates to Sanitizer, which
+    # preserves this exact only/except behavior; `denylist` is a new, opt-in
+    # parameter (nil = no denylist applied, the pre-existing default).
+    def select_value(record, only:, except:, denylist: nil)
+      Sanitizer.call(record.attributes, only: only, except: except, denylist: denylist)
     end
 
     # A persisted version stamp, stable across retries; falls back to wall-clock only
@@ -62,10 +61,6 @@ module ActsAsTbackend
 
     def record_valid_time(record)
       record.respond_to?(:valid_time) ? record.valid_time : nil
-    end
-
-    def stringify(hash)
-      hash.each_with_object({}) { |(k, v), out| out[k.to_s] = v }
     end
 
     def disabled_result

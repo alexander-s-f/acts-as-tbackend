@@ -4,9 +4,11 @@ require_relative "acts_as_tbackend/version"
 require_relative "acts_as_tbackend/config"
 require_relative "acts_as_tbackend/circuit_breaker"
 require_relative "acts_as_tbackend/fact"
+require_relative "acts_as_tbackend/sanitizer"
 require_relative "acts_as_tbackend/connection"
 require_relative "acts_as_tbackend/pool"
 require_relative "acts_as_tbackend/client"
+require_relative "acts_as_tbackend/failure_policy"
 require_relative "acts_as_tbackend/mirror"
 
 # Production connector for the TBackend temporal-ledger daemon.
@@ -46,6 +48,11 @@ module ActsAsTbackend
     # Shared pooled client. Thread-safe; memoized per process.
     def client
       @client ||= Client.new(config)
+    end
+
+    # Safe introspection - see Client#health. Never raises.
+    def health
+      client.health
     end
 
     # Rebuild pool + client. Call in the forking hook (Puma `on_worker_boot`,

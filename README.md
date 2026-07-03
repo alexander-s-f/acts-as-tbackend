@@ -28,7 +28,10 @@ team-facing source and RubyGems is the package authority.
 | **Fact** | `lib/acts_as_tbackend/fact.rb` | deterministic derived ids + fact builder. |
 | **Config** | `lib/acts_as_tbackend/config.rb` | host/port/token/timeouts/pool size/durability (ENV-defaulted). |
 | **Mirror** | `lib/acts_as_tbackend/mirror.rb` | plain-Ruby record to fact envelope + soft `write_fact_once_safe`. |
+| **Sanitizer** | `lib/acts_as_tbackend/sanitizer.rb` | plain-Ruby attribute filter (`only`/`except`/`denylist`), used by Mirror. |
+| **FailurePolicy** | `lib/acts_as_tbackend/failure_policy.rb` | named policy for a soft mirror failure: `ignore` / `warn` / `raise_in_test` / `enqueue_retry` (reserved). |
 | **Extension** | `lib/acts_as_tbackend/extension.rb` | optional ActiveRecord macro, loaded explicitly by Rails apps. |
+| **TestHelpers** | `lib/acts_as_tbackend/test_helpers.rb` | opt-in (`require "acts_as_tbackend/test_helpers"`) fake client + assertion helpers for app test suites. |
 
 ## Usage
 
@@ -82,6 +85,115 @@ If the daemon is down, the write returns a soft result such as
 `status: "unavailable"` or `status: "circuit_open"` and the Rails request path is
 not raised by default. For heavier paths, call `record.tbackend_fact(...)` or
 `ActsAsTbackend::Mirror.mirror!(...)` from an app-owned background job.
+
+## Health check
+
+`ActsAsTbackend.health` (or `client.health`) never raises — safe to wire into a
+Rails health-check endpoint or a rake task unconditionally, regardless of
+`config.strict`:
+
+```ruby
+ActsAsTbackend.health
+# => { enabled: true, host: "127.0.0.1", port: 7401, durability_default: "accepted",
+#      strict: false, failure_policy: "ignore",
+#      ok: true, status: "ok", error: nil }
+#    status ∈ ok | down | circuit_open | auth_error | config_error | disabled | error
+```
+
+The token is never included as a field, and any token substring is redacted out
+of `error` text before it's returned.
+
+## Failure policy
+
+`config.failure_policy` names what happens, in addition to the soft result
+itself, when a mirror write soft-fails (a successful `disabled`/`committed_acked`/
+`idempotent_replay` never triggers it):
+
+```ruby
+ActsAsTbackend.configure { |c| c.failure_policy = "warn" }
+```
+
+| Policy | Behavior |
+| --- | --- |
+| `ignore` (default) | No extra action — soft result only, exactly today's behavior. |
+| `warn` | Also `warn(...)` a one-line description (store/event_type/status/error). |
+| `raise_in_test` | Also raises `ActsAsTbackend::MirrorFailure` — but **only** when `RAILS_ENV`/`RACK_ENV` is `"test"` (or `TBACKEND_FORCE_TEST_MODE=1`). Never in production, so it's safe to leave set in shared config. |
+| `enqueue_retry` | Reserved for a future outbox worker (P5+). Accepted now so apps can name their intent; **no retry/enqueue behavior exists yet** — it currently behaves like `ignore`. |
+
+## Test helpers
+
+`require "acts_as_tbackend/test_helpers"` (opt-in — not loaded by the core
+entrypoint) for testing app code that calls `ActsAsTbackend.client` or
+`Mirror.mirror!` without a live daemon:
+
+```ruby
+require "acts_as_tbackend/test_helpers"
+
+ActsAsTbackend::TestHelpers.stub_client do |fake|
+  fake.queue_result(status: :committed_acked, seq_id: 7)
+
+  captured = ActsAsTbackend::TestHelpers.capture_mirror_result(
+    record: order, store: "orders", event_type: "order.accepted"
+  )
+
+  ActsAsTbackend::TestHelpers.assert_tbackend_fact(
+    captured[:fact], store: "orders", value_includes: { "status" => "accepted" }
+  )
+  assert_equal "committed_acked", captured[:result][:status]
+end
+```
+
+`fake.queue_result(status:)` accepts any real daemon status —
+`committed_acked`, `idempotent_replay`, `duplicate_fact_id_conflict`,
+`unavailable`, `timeout_unknown`, `circuit_open` — with sane `ok`/`committed`/
+`retryable` defaults per status; pass extra kwargs to override any field.
+`fake.calls` records every call made (method, args, kwargs) for assertions.
+
+## Shadow without authority
+
+The recipe for adding this gem to a Rails app **without** making TBackend an
+authority over anything:
+
+```ruby
+ActsAsTbackend.configure do |c|
+  c.host = "127.0.0.1"; c.port = 7401   # loopback or a private daemon only
+  c.strict = false                       # NEVER raise into the request path
+  c.durability_default = "accepted"      # page-cache ack; a shadow write isn't a commit record
+  c.failure_policy = "ignore"            # a down daemon must not surface as an app error
+end
+
+class Order < ApplicationRecord
+  # Triple guard: (1) `enabled` kill-switch, (2) `strict: false` never raises,
+  # (3) sample instead of mirroring every write if volume is a concern.
+  acts_as_tbackend store: "orders", except: %i[created_at updated_at]
+
+  after_commit :maybe_mirror, on: %i[create update]
+
+  private
+
+  def maybe_mirror
+    return unless rand < 0.1 # sampling — mirror only 10% of writes, if desired
+
+    mirror_tbackend(event_type: "sampled")
+  end
+end
+```
+
+- **Rails/Postgres stay authoritative.** Nothing reads from TBackend to make a
+  business decision; `tbackend_history`/`tbackend_latest_for` are for
+  observability/debugging only.
+- **A soft result is evidence, not a receipt.** `status: "committed_acked"`
+  means the daemon accepted the write — it does not mean the business
+  transaction is safe, correct, or even still true (TBackend has no read
+  authority in this posture).
+- **Never let a shadow write become a hard dependency.** `strict: false` (the
+  default) + `failure_policy: "ignore"` or `"warn"` (never `"raise_in_test"`
+  outside test, and never anything that raises in production) keeps a
+  completely down daemon invisible to the app's own request path.
+- **Watch `ActsAsTbackend.health`**, not the mirror's return value, for
+  operational visibility — a dashboard/rake task polling `health[:status]`
+  is the intended way to notice "TBackend has been down for an hour," not
+  scraping mirror results out of application logs.
 
 ## Fork-safety (Puma / Sidekiq)
 
