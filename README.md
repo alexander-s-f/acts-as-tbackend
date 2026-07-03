@@ -184,6 +184,9 @@ not create a database table, enqueue a job, or run an internal retry loop. A
 `timeout_unknown` stays retryable-but-unknown: retrying is safe because the fact
 id is deterministic, and the daemon may answer `idempotent_replay` next time.
 
+For an app-owned ActiveRecord table/model/worker shape, see
+[`docs/active-record-outbox-example-p6.md`](docs/active-record-outbox-example-p6.md).
+
 ## Shadow without authority
 
 The recipe for adding this gem to a Rails app **without** making TBackend an
